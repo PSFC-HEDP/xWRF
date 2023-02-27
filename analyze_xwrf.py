@@ -2,6 +2,7 @@
 import argparse
 import os
 from math import inf, nan, pi
+from typing import Optional
 
 import h5py
 import numpy as np
@@ -26,12 +27,16 @@ def main() -> None:
 	parser = argparse.ArgumentParser(
 		prog="analyze_xwrf",
 		description = "analyze the xWRF scan files in a given directory.")
-	parser.add_argument("filename", help="Any files in the scans directory with this substring in their filename "
-	                                     "will be analyzed")
-	parser.add_argument("filter_id", help="the ID number of the wedge range filter")
-	parser.add_argument("--cr39", action="store_true", help="whether there was a piece of CR-39 in front of the "
-	                                                        "image plate")
-	parser.add_argument("--nose", action="store_true", help="whether a 300 μm Al nosetip was in front of the WRF")
+	parser.add_argument("filename", type=str,
+	                    help="Any files in the scans directory with this substring in their filename will be analyzed")
+	parser.add_argument("wedge_id", type=str,
+	                    help="the ID number of the wedge range filter")
+	parser.add_argument("--filter", type=float,
+	                    help="the thickness of flat aluminum filtering in front of the image plate in μm")
+	parser.add_argument("--cr39", action="store_true",
+	                    help="whether there was a piece of CR-39 in front of the image plate")
+	parser.add_argument("--nose", action="store_true",
+	                    help="whether a 300 μm Al nosetip was in front of the WRF")
 	args = parser.parse_args()
 
 	for filename in os.listdir(SCAN_DIRECTORY):
@@ -44,7 +49,7 @@ def main() -> None:
 
 		try:
 			temperature, error = analyze_scanfile(os.path.join(SCAN_DIRECTORY, filename),
-			                                      args.filter_id, args.cr39, args.nose)
+			                                      args.wedge_id, args.filter, args.cr39, args.nose)
 		except RuntimeError as e:
 			print(e)
 			continue
@@ -55,7 +60,18 @@ def main() -> None:
 	raise FileNotFoundError(f"did not find any filename matching {args.filename}")
 
 
-def analyze_scanfile(filename: str, filter_id: str, nose: bool, cr39: bool) -> tuple[float, float]:
+def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose: bool, cr39: bool) -> tuple[float, float]:
+	""" infer electron temperature from a single xWRF scanfile
+	    :param filename: a substring that specifies which file you want.  it doesn’t have to be the
+	                     complete filename; just the shot number will usually do.
+	    :param wedge_id: the ID of the WRF that was used (for example "G069")
+	    :param filter: if an aluminum filter was placed between the wedge and the image plate, this
+	                   is the thickness of that filter in μm.  otherwise, it should be 0 or None.
+	    :param nose: whether a 300 μm aluminum nose was present in front of the wedge (in
+	                 addition to any flat filter specified by the `filter` argument)
+	    :param cr39: whether a 1500 μm piece of CR-39 was present between the wedge and the image plate
+	    :return: the inferred temperature and the error bar on that temperature
+	"""
 	# set it to work from the base directory regardless of whence we call the file
 	if os.path.basename(os.getcwd()) == "src":
 		os.chdir(os.path.dirname(os.getcwd()))
@@ -71,12 +87,14 @@ def analyze_scanfile(filename: str, filter_id: str, nose: bool, cr39: bool) -> t
 	pixel_width = x_bin*1e-4
 
 	# rotate, average in the nondispersive direction, and map to thickness
-	thicknesses, psl = collapse_image(pixel_width, image, filter_id)
+	thicknesses, psl = collapse_image(pixel_width, image, wedge_id)
 
 	# calculate sensitivity curves
 	reference_energies = np.geomspace(1, 1e3, 61)
 	Al_attenuation = load_attenuation_curve(reference_energies, "Al")
 	log_sensitivity = log_xray_sensitivity(reference_energies, fade_time)
+	if filter is not None:
+		log_sensitivity -= filter*load_attenuation_curve(reference_energies, "Al")
 	if nose:
 		log_sensitivity -= 300*load_attenuation_curve(reference_energies, "Al")
 	if cr39:
@@ -280,7 +298,7 @@ def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float
 			axs[0].set_title(f"Te = {best_Te:.3f} ± {error_Te:.3f} keV")
 			axs[0].set_ylabel("PSL")
 			axs[1].errorbar(x=thicknesses, y=measurements - numerator/denominator*unscaled_psl,
-			                yerr=measurement_errors, color="C2")
+			                yerr=measurement_errors, fmt="C2.")
 			axs[1].grid("on")
 			axs[1].set_ylabel("Residual")
 			axs[1].set_xlabel("Aluminum thickness (μm)")
