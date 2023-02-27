@@ -39,25 +39,7 @@ def main() -> None:
 	                    help="whether a 300 μm Al nosetip was in front of the WRF")
 	args = parser.parse_args()
 
-	for filename in os.listdir(SCAN_DIRECTORY):
-		if os.path.splitext(filename)[-1] != ".h5":
-			continue
-		if args.filename not in filename:
-			continue
-
-		print(filename)
-
-		try:
-			temperature, error = analyze_scanfile(os.path.join(SCAN_DIRECTORY, filename),
-			                                      args.wedge_id, args.filter, args.cr39, args.nose)
-		except RuntimeError as e:
-			print(e)
-			continue
-
-		print(f"T_e = {temperature:.2f} ± {error:.2f}")
-		return
-
-	raise FileNotFoundError(f"did not find any filename matching {args.filename}")
+	analyze_scanfile(args.filename, args.wedge_id, args.filter, args.cr39, args.nose)
 
 
 def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose: bool, cr39: bool) -> tuple[float, float]:
@@ -72,12 +54,12 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 	    :param cr39: whether a 1500 μm piece of CR-39 was present between the wedge and the image plate
 	    :return: the inferred temperature and the error bar on that temperature
 	"""
-	# set it to work from the base directory regardless of whence we call the file
-	if os.path.basename(os.getcwd()) == "src":
-		os.chdir(os.path.dirname(os.getcwd()))
+	# find the scanfile
+	filepath = find_file(SCAN_DIRECTORY, filename, ".h5")
+	print(f"Analyzing {filepath}...")
 
-	# load imaging data
-	with h5py.File(filename, 'r') as f:
+	# load the imaging data
+	with h5py.File(filepath, 'r') as f:
 		image = f["PSL_per_px"][:, :].T
 		x_bin = f["PSL_per_px"].attrs["pixelSizeX"]  # (μm)
 		y_bin = f["PSL_per_px"].attrs["pixelSizeY"]  # (μm)
@@ -105,6 +87,7 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 	                                   psl, np.ones(psl.shape),
 	                                   reference_energies, Al_attenuation, log_sensitivity)
 
+	print(f"Inferred T_e = {Te:.2f} ± {dTe:.2f}")
 	return Te, dTe
 
 
@@ -355,6 +338,16 @@ def psl_fade(time: float, A1: float, A2: float, τ1: float, τ2: float):
 	    :param τ2: the decay time of the slower eigenmode (nominally 98.5±9.1 ks)
 	"""
 	return A1*np.exp(-time/τ1) + A2*np.exp(-time/τ2) + (1 - A1 - A2)
+
+
+def find_file(directory: str, substring: str, extension: str) -> str:
+	""" search a directory for a filename containing the given substring and ending in the given
+	    extension, and return that filepath
+	"""
+	for filename in os.listdir(SCAN_DIRECTORY):
+		if substring in filename and os.path.splitext(filename)[-1] == extension:
+			return os.path.join(directory, filename)
+	raise FileNotFoundError(f"did not find any file in `{directory}` matching `*{substring}*{extension}`")
 
 
 if __name__ == "__main__":
