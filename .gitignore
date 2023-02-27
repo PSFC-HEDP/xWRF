@@ -8,6 +8,7 @@ __pypackages__/
 
 # PyCharm
 .idea/
+*.iml
 
 # Scanfiles
 *.h5
