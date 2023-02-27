@@ -17,7 +17,7 @@ Point = np.dtype((float, (2,)))
 
 SCAN_DIRECTORY = "scans"
 
-Ξ_MIN = 0.10
+Ξ_MIN = 0.05
 Ξ_MAX = 0.95
 Υ_MIN = 0.06
 Υ_MAX = 0.94
@@ -88,6 +88,8 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 	                                   reference_energies, Al_attenuation, log_sensitivity)
 
 	print(f"Inferred T_e = {Te:.2f} ± {dTe:.2f}")
+	plt.show()
+
 	return Te, dTe
 
 
@@ -129,32 +131,17 @@ def collapse_image(pixel_width: float, image: NDArray[float], filter_id: str) ->
 	plt.figure()
 	plt.imshow(rebased_image.T, extent=(0, 1, 0, 1), origin="lower",
 	           cmap=CMAP["psl"], vmax=min(np.max(rebased_image), 1.1*np.max(cropped_image)))
-	plt.axhline(Υ_MIN, color="w", linewidth=1)
-	plt.axhline(Υ_MAX, color="w", linewidth=1)
-	plt.show()
+	plt.fill([Ξ_MIN, Ξ_MIN, Ξ_MAX, Ξ_MAX], [Υ_MIN, Υ_MAX, Υ_MAX, Υ_MIN],
+	         color="none", edgecolor="w", linewidth=1)
+	plt.title("Data region (wedge is thinnest on the left)")
+	plt.xlabel("Dispersive direction")
+	plt.ylabel("Nondispersive direction")
 
 	# integrate the image along the nondispersive direction
 	measurement = np.mean(cropped_image, axis=1)
 
 	ξ_in_ξ_bounds = (ξ_data >= Ξ_MIN) & (ξ_data <= Ξ_MAX)
 	return thickness[ξ_in_ξ_bounds], measurement[ξ_in_ξ_bounds]
-
-
-def wedge_thickness_function(x: NDArray[float], x0: float, delta_t0: float, delta_dtdx: float) -> NDArray[float]:
-	""" calculate the thickness of a WRF at a set of specified x values, given calibration info
-	    :param x: the desired normalized x values, from 0 (at the left fiducial) to 1 (at the right fiducial)
-	    :param x0: the x, measured from the midpoint, at which the calibration measurements were made
-	    :param delta_t0: the opposite of the difference between the actual thickness at xp and the nominal one
-	    :param delta_dtdx: the difference between the actual slope and the nominal slope (why didn’t Fredrick just record the total slope?)
-	    :return: the average thickness at that x value (μm)
-	"""
-	half_width = 0.474*2.54
-	X = (2*x - 1)*half_width  # convert to the coordinates Fredrick uses to define his calibration
-	t_left = 0.0155*2.54e4
-	t_rite = 0.0710*2.54e4
-	t0 = (t_left + t_rite)/2
-	dtdx = (t_rite - t_left)/(2*half_width)
-	return t0 - delta_t0 + delta_dtdx*x0 + X*(dtdx - delta_dtdx)
 
 
 def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
@@ -190,9 +177,9 @@ def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
 	plt.imshow(image.T,
 	           extent=(0, image.shape[1]*pixel_width, 0, image.shape[0]*pixel_width),
 	           origin="lower", cmap=CMAP["psl"])
-	plt.plot(fiducials[:, 0], fiducials[:, 1], "w.")
-	plt.plot(fiducials[:, 0], fiducials[:, 1], "kx")
-	plt.show()
+	plt.plot(fiducials[:, 0], fiducials[:, 1], "wx", markersize=13)
+	plt.title("Raw data (fiducials are marked with white exes)")
+	plt.ylabel("Axes measured in cm")
 
 	if len(fiducials) == 0:
 		raise RuntimeError("no fiducials found")
@@ -281,14 +268,13 @@ def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float
 			axs[0].plot(thicknesses, measurements, "C0-", label="Data")
 			axs[0].plot(thicknesses, numerator/denominator*unscaled_psl, "C1--", label="Fit")
 			axs[0].grid("on")
-			axs[0].set_title(f"Te = {best_Te:.3f} ± {error_Te:.3f} keV")
+			axs[0].set_title(f"Best fit (Te = {best_Te:.3f} ± {error_Te:.3f} keV)")
 			axs[0].set_ylabel("PSL")
 			axs[1].errorbar(x=thicknesses, y=measurements - numerator/denominator*unscaled_psl,
 			                yerr=measurement_errors, fmt="C2.")
 			axs[1].grid("on")
 			axs[1].set_ylabel("Residual")
 			axs[1].set_xlabel("Aluminum thickness (μm)")
-			plt.show()
 
 			return best_Te, error_Te, best_εL, error_εL
 		else:
@@ -338,6 +324,23 @@ def psl_fade(time: float, A1: float, A2: float, τ1: float, τ2: float):
 	    :param τ2: the decay time of the slower eigenmode (nominally 98.5±9.1 ks)
 	"""
 	return A1*np.exp(-time/τ1) + A2*np.exp(-time/τ2) + (1 - A1 - A2)
+
+
+def wedge_thickness_function(x: NDArray[float], x0: float, delta_t0: float, delta_dtdx: float) -> NDArray[float]:
+	""" calculate the thickness of a WRF at a set of specified x values, given calibration info
+	    :param x: the desired normalized x values, from 0 (at the left fiducial) to 1 (at the right fiducial)
+	    :param x0: the x, measured from the midpoint, at which the calibration measurements were made
+	    :param delta_t0: the opposite of the difference between the actual thickness at xp and the nominal one
+	    :param delta_dtdx: the difference between the actual slope and the nominal slope (why didn’t Fredrick just record the total slope?)
+	    :return: the average thickness at that x value (μm)
+	"""
+	half_width = 0.474*2.54
+	X = (2*x - 1)*half_width  # convert to the coordinates Fredrick uses to define his calibration
+	t_left = 0.0155*2.54e4
+	t_rite = 0.0710*2.54e4
+	t0 = (t_left + t_rite)/2
+	dtdx = (t_rite - t_left)/(2*half_width)
+	return t0 - delta_t0 + delta_dtdx*x0 + X*(dtdx - delta_dtdx)
 
 
 def find_file(directory: str, substring: str, extension: str) -> str:
