@@ -139,19 +139,22 @@ def collapse_image(pixel_width: float, image: NDArray[float], filter_id: str) ->
 	if np.mean(rebased_image[0, υ_in_υ_bounds]) < np.mean(rebased_image[-1, υ_in_υ_bounds]):
 		rebased_image = rebased_image[::-1, :]
 
+	# crop out the fiducial region
+	cropped_image = rebased_image[:, υ_in_υ_bounds]
+
 	# show the rebased image
 	plt.figure()
 	plt.imshow(rebased_image.T, extent=(0, 1, 0, 1), origin="lower",
-	           vmin=-.3*np.max(rebased_image), cmap=CMAP["psl"])
-	plt.axhline(Υ_MIN, color="k")
-	plt.axhline(Υ_MAX, color="k")
+	           cmap=CMAP["psl"], vmax=min(np.max(rebased_image), 1.1*np.max(cropped_image)))
+	plt.axhline(Υ_MIN, color="w", linewidth=1)
+	plt.axhline(Υ_MAX, color="w", linewidth=1)
 	plt.show()
 
 	# integrate the image along the nondispersive direction
-	measurement = np.mean(rebased_image[:, υ_in_υ_bounds], axis=1)
+	measurement = np.mean(cropped_image, axis=1)
 
-	ξ_data_in_ξ_bounds = (ξ_data >= Ξ_MIN) & (ξ_data <= Ξ_MAX)
-	return thickness[ξ_data_in_ξ_bounds], measurement[ξ_data_in_ξ_bounds]
+	ξ_in_ξ_bounds = (ξ_data >= Ξ_MIN) & (ξ_data <= Ξ_MAX)
+	return thickness[ξ_in_ξ_bounds], measurement[ξ_in_ξ_bounds]
 
 
 def wedge_thickness_function(x: NDArray[float], x0: float, delta_t0: float, delta_dtdx: float) -> NDArray[float]:
@@ -203,8 +206,8 @@ def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
 	# show the user where it thinks the fiducials are
 	plt.imshow(image.T,
 	           extent=(0, image.shape[1]*pixel_width, 0, image.shape[0]*pixel_width),
-	           origin="lower", vmin=-0.3*np.max(image),
-	           cmap=CMAP["psl"])
+	           origin="lower", cmap=CMAP["psl"])
+	plt.plot(fiducials[:, 0], fiducials[:, 1], "w.")
 	plt.plot(fiducials[:, 0], fiducials[:, 1], "kx")
 	plt.show()
 
