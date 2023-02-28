@@ -136,6 +136,7 @@ def collapse_image(pixel_width: float, image: NDArray[float], filter_id: str) ->
 	plt.title("Data region (wedge is thinnest on the left)")
 	plt.xlabel("Dispersive direction")
 	plt.ylabel("Nondispersive direction")
+	plt.locator_params(steps=[1, 2, 5, 10])
 
 	# integrate the image along the nondispersive direction
 	measurement = np.mean(cropped_image, axis=1)
@@ -180,6 +181,7 @@ def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
 	plt.plot(fiducials[:, 0], fiducials[:, 1], "wx", markersize=13)
 	plt.title("Raw data (fiducials are marked with white exes)")
 	plt.ylabel("Axes measured in cm")
+	plt.locator_params(steps=[1, 2, 5, 10])
 
 	if len(fiducials) == 0:
 		raise RuntimeError("no fiducials found")
@@ -270,11 +272,13 @@ def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float
 			axs[0].grid("on")
 			axs[0].set_title(f"Best fit (Te = {best_Te:.3f} ± {error_Te:.3f} keV)")
 			axs[0].set_ylabel("PSL")
+			axs[0].locator_params(steps=[1, 2, 5, 10], nbins=10)
 			axs[1].errorbar(x=thicknesses, y=measurements - numerator/denominator*unscaled_psl,
-			                yerr=measurement_errors, fmt="C2.")
+			                yerr=measurement_errors, fmt="C2.", linewidth=.8)
 			axs[1].grid("on")
 			axs[1].set_ylabel("Residual")
 			axs[1].set_xlabel("Aluminum thickness (μm)")
+			axs[1].locator_params(steps=[1, 2, 5, 10], nbins=10)
 
 			return best_Te, error_Te, best_εL, error_εL
 		else:
