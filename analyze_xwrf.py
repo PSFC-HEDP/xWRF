@@ -17,7 +17,7 @@ Point = np.dtype((float, (2,)))
 
 SCAN_DIRECTORY = "scans"
 
-Ξ_MIN = 0.05
+Ξ_MIN = 0.20
 Ξ_MAX = 0.95
 Υ_MIN = 0.06
 Υ_MAX = 0.94
