@@ -20,3 +20,6 @@
  python analyze_all_xwrfs.py
  ```
  I think that script is pretty self-explanatory.
+
+# To do
+ Error bars.
