@@ -286,7 +286,7 @@ def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float
 
 
 def log_xray_sensitivity(energy: NDArray[float], fade_time: float,
-                         thickness=112., psl_attenuation=1/45., material="BaFBr",
+                         thickness=112., psl_attenuation=1/45., material="phosphor",
                          A1=.436, A2=.403, τ1=1.134e3, τ2=9.85e4) -> NDArray[float]:
 	""" calculate the log of the fraction of x-ray energy at some frequency that is measured by an
 	    image plate of the given characteristics, given some filtering in front of it
