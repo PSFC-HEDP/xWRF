@@ -117,7 +117,6 @@ def collapse_image(pixel_width: float, image: NDArray[float], wedge_id: str
 	calibration = calibration_table.loc[wedge_id.lower()]
 	thickness = wedge_thickness_function(ξ_data, calibration.xp, calibration.dt0, calibration.dtdx)
 	thickness_error = calibration["systematic error"]/.02  # fudge this by assuming dE/dx=20keV/μm (MeV/(MeV/μm) = μm)
-	print(f"calibration error of {calibration['systematic error']} MeV, stopping at .02MeV/um, means {thickness_error} um error")
 
 	# locate the fiducials and rebase to them
 	υ_lever, origin, ξ_lever = find_fiducials(pixel_width, image)[:, np.newaxis, np.newaxis, :]
@@ -284,11 +283,12 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 	axs[0].set_ylabel("PSL (×10³)")
 	axs[0].locator_params(steps=[1, 2, 5, 10], nbins=10)
 
-	axs[1].plot(thicknesses, (measurements - reconstruction)*1e3, "C2.", linewidth=.8)
+	axs[1].plot(thicknesses, (measurements - reconstruction)*1e3, "C2.", zorder=30)
 	axs[1].fill_between(thicknesses,
 	                    np.min(sample_residuals, axis=0)*1e3,
 	                    np.max(sample_residuals, axis=0)*1e3,
-	                    color="C2", alpha=1/4)
+	                    color="C2", alpha=1/4, zorder=20)
+	axs[1].axhline(0, color="k", linewidth=1, zorder=10)
 	axs[1].grid("on")
 	axs[1].set_ylabel("Residual (×10³)")
 	axs[1].set_xlabel("Aluminum thickness (μm)")
