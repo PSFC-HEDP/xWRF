@@ -19,8 +19,14 @@ SCAN_DIRECTORY = "scans"
 
 Ξ_MIN = 0.20
 Ξ_MAX = 0.95
-Υ_MIN = 0.06
+Υ_MIN = 0.01
 Υ_MAX = 0.94
+NUM_SAMPLES = 2
+THICKNESS_ERROR = 3.e-2
+PSL_ATTENUATION = 1/45.  # μm^-1
+PSL_ATTENUATION_ERROR = 5.e-3  # μm^-1
+SENSITIVITY = 1/2200
+SENSITIVITY_ERROR = 4.e-5
 
 
 def main() -> None:
@@ -60,41 +66,44 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 
 	# load the imaging data
 	with h5py.File(filepath, 'r') as f:
-		image = f["PSL_per_px"][:, :].T
 		x_bin = f["PSL_per_px"].attrs["pixelSizeX"]  # (μm)
 		y_bin = f["PSL_per_px"].attrs["pixelSizeY"]  # (μm)
-		fade_time = f["PSL_per_px"].attrs["scanDelaySeconds"]
+		image = f["PSL_per_px"][:, :].T/x_bin/y_bin  # (?/μm^2)
+		fade_time = f["PSL_per_px"].attrs["scanDelaySeconds"]  # (s)
 	if x_bin != y_bin:
 		raise ValueError("why would these ever not be equal")
 	pixel_width = x_bin*1e-4
 
 	# rotate, average in the nondispersive direction, and map to thickness
-	thicknesses, psl = collapse_image(pixel_width, image, wedge_id)
+	thicknesses, thickness_error, psl = collapse_image(pixel_width, image, wedge_id)
 
-	# calculate sensitivity curves
+	# put together whatever flat filter is out front
 	reference_energies = np.geomspace(1, 1e3, 61)
 	Al_attenuation = load_attenuation_curve(reference_energies, "Al")
-	log_sensitivity = log_xray_sensitivity(reference_energies, fade_time)
+	log_transmission = np.zeros(reference_energies.size)
 	if filter is not None:
-		log_sensitivity -= filter*load_attenuation_curve(reference_energies, "Al")
+		log_transmission -= filter*load_attenuation_curve(reference_energies, "Al")
 	if nose:
-		log_sensitivity -= 300*load_attenuation_curve(reference_energies, "Al")
+		log_transmission -= 300*load_attenuation_curve(reference_energies, "Al")
 	if cr39:
-		log_sensitivity -= 1500*load_attenuation_curve(reference_energies, "cr39")
+		log_transmission -= 1500*load_attenuation_curve(reference_energies, "cr39")
 
 	# perform the temperature fit
-	Te, dTe, εL, dεL = fit_temperature(thicknesses, np.zeros(thicknesses.shape),
-	                                   psl, np.ones(psl.shape),
-	                                   reference_energies, Al_attenuation, log_sensitivity)
+	Te, dTe, εL, dεL = fit_temperature_with_error_bars(
+		thicknesses, thickness_error, psl, reference_energies, log_transmission, Al_attenuation, fade_time)
 
-	print(f"Inferred T_e = {Te:.2f} ± {dTe:.2f}")
+	print(f"Inferred electron temperature = {Te:.2f} ± {dTe:.2f} keV\n"
+	      f"               total emission = {εL:.3g} ± {dεL:.3g} (units unclear)")
 	plt.show()
 
 	return Te, dTe
 
 
-def collapse_image(pixel_width: float, image: NDArray[float], filter_id: str) -> tuple[NDArray[float], NDArray[float]]:
-	""" find the fiducials in an xWRF scan, rotate the image, and map PSL to filter thickness """
+def collapse_image(pixel_width: float, image: NDArray[float], wedge_id: str
+                   ) -> tuple[NDArray[float], float, NDArray[float]]:
+	""" find the fiducials in an xWRF scan, rotate the image, and map PSL to filter thickness
+	    :return the array of thicknesses (μm), the error bar on those thicknesses (μm), and the array of PSL values (PSL/μm^2)
+	"""
 	x_centers = np.arange(0.5, image.shape[0])*pixel_width  # (cm)
 	y_centers = np.arange(0.5, image.shape[1])*pixel_width  # (cm)
 	image_interpolator = interpolate.RegularGridInterpolator((x_centers, y_centers), image)
@@ -105,32 +114,36 @@ def collapse_image(pixel_width: float, image: NDArray[float], filter_id: str) ->
 
 	# load the WRF thickness calibration
 	calibration_table = pd.read_csv("tables/wrf_calibrations.csv", sep=",", index_col="id")
-	calibration = calibration_table.loc[filter_id.lower()]
+	calibration = calibration_table.loc[wedge_id.lower()]
 	thickness = wedge_thickness_function(ξ_data, calibration.xp, calibration.dt0, calibration.dtdx)
+	thickness_error = calibration["systematic error"]/.02  # fudge this by assuming dE/dx=20keV/μm (MeV/(MeV/μm) = μm)
+	print(f"calibration error of {calibration['systematic error']} MeV, stopping at .02MeV/um, means {thickness_error} um error")
 
 	# locate the fiducials and rebase to them
-	ξ_lever, origin, υ_lever = find_fiducials(pixel_width, image)[:, np.newaxis, np.newaxis, :]
+	υ_lever, origin, ξ_lever = find_fiducials(pixel_width, image)[:, np.newaxis, np.newaxis, :]
 	xy_data = origin + \
 	          ξ_data[:, np.newaxis, np.newaxis]*(ξ_lever - origin) + \
 	          υ_data[np.newaxis, :, np.newaxis]*(υ_lever - origin)
 	rebased_image = image_interpolator(tuple(np.transpose(xy_data, (2, 0, 1))))
 
 	# guess if you have to rotate it
-	υ_in_υ_bounds = (υ_data >= Υ_MIN) & (υ_data <= Υ_MAX)
-	clean_image = rebased_image[(ξ_data >= Υ_MIN) & (ξ_data <= Υ_MAX)][:, υ_in_υ_bounds]
+	clean_image = rebased_image[(ξ_data >= 1 - Υ_MAX) & (ξ_data <= Υ_MAX)][:, (υ_data >= 1 - Υ_MAX) & (υ_data <= Υ_MAX)]
 	if np.ptp(np.mean(clean_image, axis=0)) > np.ptp(np.mean(clean_image, axis=1)):
-		rebased_image = rebased_image.T
+		rebased_image = rebased_image.T[:, ::-1]
+		clean_image = clean_image.T[:, ::-1]
 	# guess if you have to flip it
-	if np.mean(rebased_image[0, υ_in_υ_bounds]) < np.mean(rebased_image[-1, υ_in_υ_bounds]):
-		rebased_image = rebased_image[::-1, :]
+	if np.mean(clean_image[0, :]) < np.mean(clean_image[-1, :]):
+		rebased_image = rebased_image[::-1, ::-1]
 
-	# crop out the fiducial region
-	cropped_image = rebased_image[:, υ_in_υ_bounds]
+	# crop out the fiducial region and the unusable left area
+	full_image = rebased_image[:, (υ_data >= 1 - Υ_MAX) & (υ_data <= Υ_MAX)]
+	cropped_image = rebased_image[(ξ_data >= Ξ_MIN) & (ξ_data <= Ξ_MAX)][:, (υ_data >= Υ_MIN) & (υ_data <= Υ_MAX)]
+	thickness = thickness[(ξ_data >= Ξ_MIN) & (ξ_data <= Ξ_MAX)]
 
 	# show the rebased image
-	plt.figure()
+	plt.figure(figsize=(5, 5))
 	plt.imshow(rebased_image.T, extent=(0, 1, 0, 1), origin="lower",
-	           cmap=CMAP["psl"], vmax=min(np.max(rebased_image), 1.1*np.max(cropped_image)))
+	           cmap=CMAP["psl"], vmax=min(np.max(rebased_image), 1.1*np.max(full_image)))
 	plt.fill([Ξ_MIN, Ξ_MIN, Ξ_MAX, Ξ_MAX], [Υ_MIN, Υ_MAX, Υ_MAX, Υ_MIN],
 	         color="none", edgecolor="w", linewidth=1)
 	plt.title("Data region (wedge is thinnest on the left)")
@@ -141,8 +154,7 @@ def collapse_image(pixel_width: float, image: NDArray[float], filter_id: str) ->
 	# integrate the image along the nondispersive direction
 	measurement = np.mean(cropped_image, axis=1)
 
-	ξ_in_ξ_bounds = (ξ_data >= Ξ_MIN) & (ξ_data <= Ξ_MAX)
-	return thickness[ξ_in_ξ_bounds], measurement[ξ_in_ξ_bounds]
+	return thickness, thickness_error, measurement
 
 
 def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
@@ -175,6 +187,7 @@ def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
 	fiducials = np.array(fiducials, dtype=Point)
 
 	# show the user where it thinks the fiducials are
+	plt.figure(figsize=(5, 5))
 	plt.imshow(image.T,
 	           extent=(0, image.shape[1]*pixel_width, 0, image.shape[0]*pixel_width),
 	           origin="lower", cmap=CMAP["psl"])
@@ -198,26 +211,118 @@ def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
 		np.hypot(fiducials[:, 0] - initial[0],
 		         fiducials[:, 1] - initial[1]))]
 	fiducials = fiducials[[0, 1, -1]]  # downselect somewhat randomly to just three
+	if not triangle_is_counterclockwise(fiducials[0, :], fiducials[1, :], fiducials[2, :]):
+		fiducials = fiducials[::-1, :]  # order them so they make a widdershins triangle
 	return fiducials
 
 
-def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float],
-                    measurements: NDArray[float], measurement_errors: NDArray[float],
-                    energies: NDArray[float], attenuations: NDArray[float],
-                    log_sensitivities: NDArray[float]
-                    ) -> tuple[float, float, float, float]:
-	""" take a set of measured x-ray intensity values from a single chord thru the implosion and
-		use their average and their ratios to infer the emission-averaged electron temperature,
-		and the total line-integrated photic emission along that chord.
-		:param thicknesses: the set of aluminum thicknesses represented in the filter (μm)
-		:param thickness_errors: the error bars on the thickness values (μm)
+def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error: float,
+                                    measurements: NDArray[float],
+                                    energies: NDArray[float],
+                                    log_transmissions: NDArray[float], attenuations: NDArray[float],
+                                    fade_time: float,
+                                    ) -> tuple[float, float, float, float]:
+	""" take a set of measured x-ray intensity values from a single chord thru the implosion and use their average and
+	    their ratios to infer the emission-averaged electron temperature, and the total line-integrated photic emission
+	    along that chord. assume you know the PSL values and thicknesses exactly.
+	    :param thicknesses: the set of aluminum thicknesses represented in the wedge (μm)
+	    :param thickness_error: the maximum plausible difference between the nominal and actual wedge thickness at
+	           any given point (μm)
+	    :param measurements: the detected radiation corresponded to each thickness (PSL/μm^2)
+	    :param energies: the photon energies at which the sensitivities should be calculated (keV)
+	    :param log_transmissions: the log of the transmission probability at each reference energy through whatever
+	                              flat filtering exists in front of the IP
+		:param attenuations: the attenuation coefficient of aluminium at each reference energy (μm^-1)
+	    :param fade_time: the delay between the experiment and the image plate scan (s)
+	    :return: the electron temperature (keV), the error bar on electron temperature (keV),
+	             the total emission (PSL/μm^2/sr), and the error bar on that (PSL/μm^2/sr)
+	"""
+	# do, not a MC per se, but a sweep of some unknowns to get error bars
+	sample_reconstructions = []
+	temperatures, emissions = [], []
+	for x in np.linspace(-1, 1, NUM_SAMPLES, endpoint=False):
+		for x_left, x_right in [(-1, x), (x, 1), (1, -x), (-x, -1)]:
+			perturbations = thickness_error*np.linspace(x_left, x_right, thicknesses.size)
+			for transmission_factor in [1 - THICKNESS_ERROR, 1 + THICKNESS_ERROR]:
+				for psl_attenuation in [PSL_ATTENUATION - PSL_ATTENUATION_ERROR, PSL_ATTENUATION + PSL_ATTENUATION_ERROR]:
+					for prefactor in [SENSITIVITY - SENSITIVITY_ERROR, SENSITIVITY + SENSITIVITY_ERROR]:
+						log_sensitivities = log_transmissions*transmission_factor + \
+						                    log_xray_sensitivity(energies, fade_time,
+						                                         prefactor=prefactor,
+						                                         psl_attenuation=psl_attenuation)
+						temperature, emission, reconstruction = fit_temperature_exactly(
+							thicknesses + perturbations, measurements,
+							energies, attenuations, log_sensitivities)
+						sample_reconstructions.append(reconstruction)
+						temperatures.append(temperature)
+						emissions.append(emission)
+
+	# define error bars as absolute ranges
+	temperature = (np.min(temperatures) + np.max(temperatures))/2
+	dtemperature = (np.max(temperatures) - np.min(temperatures))/2
+	emission = (np.min(emissions) + np.max(emissions))/2
+	demission = (np.max(emissions) - np.min(emissions))/2
+	sample_residuals = [measurements - fit for fit in sample_reconstructions]
+
+	# perform the nominal reconstruction to get the reconstructed curve out
+	log_sensitivities = log_transmissions + \
+	                    log_xray_sensitivity(energies, fade_time,
+	                                         psl_attenuation=PSL_ATTENUATION,
+	                                         prefactor=SENSITIVITY)
+	_, _, reconstruction = fit_temperature_exactly(
+		thicknesses, measurements, energies, attenuations, log_sensitivities)
+
+	# plot the fit quality
+	fig, axs = plt.subplots(2, 1, sharex="all", figsize=(7, 5), gridspec_kw=dict(hspace=0))
+	axs[0].plot(thicknesses, measurements*1e3, "C0-", label="Data", zorder=30)
+	axs[0].plot(thicknesses, reconstruction*1e3, "C1--", label="Fit", zorder=20)
+	axs[0].fill_between(thicknesses,
+	                    np.min(sample_reconstructions, axis=0)*1e3,
+	                    np.max(sample_reconstructions, axis=0)*1e3, color="C1", alpha=1/4, zorder=10)
+	axs[0].grid("on")
+	axs[0].set_title(f"Best fit (Tₑ = {temperature:.2f} ± {dtemperature:.2f} keV)")
+	axs[0].set_ylabel("PSL (×10³)")
+	axs[0].locator_params(steps=[1, 2, 5, 10], nbins=10)
+
+	axs[1].plot(thicknesses, (measurements - reconstruction)*1e3, "C2.", linewidth=.8)
+	axs[1].fill_between(thicknesses,
+	                    np.min(sample_residuals, axis=0)*1e3,
+	                    np.max(sample_residuals, axis=0)*1e3,
+	                    color="C2", alpha=1/4)
+	axs[1].grid("on")
+	axs[1].set_ylabel("Residual (×10³)")
+	axs[1].set_xlabel("Aluminum thickness (μm)")
+	axs[1].set_xlim(thicknesses[0], thicknesses[-1])
+	axs[1].locator_params(steps=[1, 2, 5, 10], nbins=10)
+	fig.tight_layout()
+
+	# plt.figure(figsize=(5, 5))
+	# plt.scatter(temperatures, emissions, c="C2", s=5, zorder=10)
+	# plt.xlabel("Inferred temperature (keV)")
+	# plt.ylabel("Inferred emission ()")
+	# plt.title("Error bar determination by sampling thicknesses")
+	# plt.grid("on")
+	# plt.tight_layout()
+
+	return temperature, dtemperature, emission, demission
+
+
+def fit_temperature_exactly(thicknesses: NDArray[float], measurements: NDArray[float],
+                            energies: NDArray[float], attenuations: NDArray[float],
+                            log_sensitivities: NDArray[float]
+                            ) -> tuple[float, float, NDArray[float]]:
+	""" take a set of measured x-ray intensity values from a single chord thru the implosion and use their average and
+	    their ratios to infer the emission-averaged electron temperature, and the total line-integrated photic emission
+	    along that chord. assume you know the PSL values and thicknesses exactly.
+		:param thicknesses: the set of aluminum thicknesses represented in the wedge (μm)
 		:param measurements: the detected radiation corresponded to each thickness (PSL/μm^2)
-		:param measurement_errors: the error bars on the psl for each pixel (PSL/μm^2)
 		:param energies: the photon energies at which the sensitivities have been calculated (keV)
 		:param attenuations: the attenuation coefficient of aluminium at each reference energy (μm^-1)
 		:param log_sensitivities: the log of the dimensionless sensitivity of the detector at each reference energy
-		:return: the electron temperature (keV) and the total emission (PSL/μm^2/sr)
+		:return: the electron temperature (keV), the total emission (PSL/μm^2/sr), and the fit measurements (PSL/μm^2)
 	"""
+	measurement_errors = 1e-3*np.sqrt(np.max(measurements)/measurements)
+
 	def compute_values(βe):
 		integrand = np.exp(
 			-energies*βe - thicknesses[:, np.newaxis]*attenuations + log_sensitivities)
@@ -242,7 +347,7 @@ def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float
 		        )/measurement_errors
 
 	if np.all(measurements == 0):
-		return 0, inf, 0, 0
+		return nan, 0, measurements
 	else:
 		# start with a scan
 		best_Te, best_χ2 = None, inf
@@ -256,44 +361,29 @@ def fit_temperature(thicknesses: NDArray[float], thickness_errors: NDArray[float
 		                                jac=lambda x: np.expand_dims(compute_derivatives(x[0]), 1),
 		                                x0=[1/best_Te],
 		                                bounds=(0, inf))
-		if result.success:
-			best_βe = result.x[0]
-			error_βe = np.linalg.inv(1/2*result.jac.T@result.jac)[0, 0]
-			best_Te = 1/best_βe
-			error_Te = error_βe/best_βe**2
+		if not result.success:
+			raise RuntimeError(result.message)
 
-			_, numerator, denominator, unscaled_psl = compute_values(best_βe)
-			best_εL = numerator/denominator*best_Te
-			error_εL = 0
+		best_βe = result.x[0]
+		best_Te = 1/best_βe
 
-			fig, axs = plt.subplots(2, 1, sharex="all")
-			axs[0].plot(thicknesses, measurements, "C0-", label="Data")
-			axs[0].plot(thicknesses, numerator/denominator*unscaled_psl, "C1--", label="Fit")
-			axs[0].grid("on")
-			axs[0].set_title(f"Best fit (Te = {best_Te:.3f} ± {error_Te:.3f} keV)")
-			axs[0].set_ylabel("PSL")
-			axs[0].locator_params(steps=[1, 2, 5, 10], nbins=10)
-			axs[1].errorbar(x=thicknesses, y=measurements - numerator/denominator*unscaled_psl,
-			                yerr=measurement_errors, fmt="C2.", linewidth=.8)
-			axs[1].grid("on")
-			axs[1].set_ylabel("Residual")
-			axs[1].set_xlabel("Aluminum thickness (μm)")
-			axs[1].locator_params(steps=[1, 2, 5, 10], nbins=10)
+		_, numerator, denominator, unscaled_psl = compute_values(best_βe)
+		best_εL = numerator/denominator*best_Te
 
-			return best_Te, error_Te, best_εL, error_εL
-		else:
-			return nan, nan, nan, nan
+		return best_Te, best_εL, numerator/denominator*unscaled_psl
 
 
 def log_xray_sensitivity(energy: NDArray[float], fade_time: float,
-                         thickness=112., psl_attenuation=1/45., material="phosphor",
+                         prefactor=1/2200, thickness=112., psl_attenuation=1/45., material="phosphor",
                          A1=.436, A2=.403, τ1=1.134e3, τ2=9.85e4) -> NDArray[float]:
-	""" calculate the log of the fraction of x-ray energy at some frequency that is measured by an
-	    image plate of the given characteristics, given some filtering in front of it
+	""" calculate the log of the fraction of x-ray energy at some frequency that is measured by an image
+	    plate of the given characteristics, given some filtering in front of it
 	    :param energy: the photon energies (keV)
 	    :param fade_time: the delay between the experiment and the image plate scan (s)
+	    :param prefactor: a constant scaling factor on the absolute sensitivity
 	    :param thickness: the thickness of the image plate (μm)
-	    :param psl_attenuation: the attenuation constant of the image plate's characteristic photostimulated luminescence
+	    :param psl_attenuation: the attenuation constant of the image plate's characteristic photostimulated
+	                            luminescence through the phosphor layer (μm^-1)
 	    :param material: the name of the image plate material (probably just the elemental symbol)
 	    :param A1: an initial condition for the fade term
 	    :param A2: an initial condition for the fade term
@@ -305,7 +395,7 @@ def log_xray_sensitivity(energy: NDArray[float], fade_time: float,
 	self_transparency = 1/(1 + psl_attenuation/attenuation)
 	log_sensitivity = np.log(
 		self_transparency * (1 - np.exp(-attenuation*thickness/self_transparency)) *
-		psl_fade(fade_time, A1, A2, τ1, τ2))
+		prefactor * psl_fade(fade_time, A1, A2, τ1, τ2))
 	return log_sensitivity
 
 
@@ -345,6 +435,11 @@ def wedge_thickness_function(x: NDArray[float], x0: float, delta_t0: float, delt
 	t0 = (t_left + t_rite)/2
 	dtdx = (t_rite - t_left)/(2*half_width)
 	return t0 - delta_t0 + delta_dtdx*x0 + X*(dtdx - delta_dtdx)
+
+
+def triangle_is_counterclockwise(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> bool:
+	""" calculate the handedness of a triplet of points """
+	return (b[0] - a[0])*(c[1] - b[1]) - (c[0] - b[0])*(b[1] - a[1]) >= 0
 
 
 def find_file(directory: str, substring: str, extension: str) -> str:
