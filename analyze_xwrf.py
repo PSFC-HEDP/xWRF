@@ -13,6 +13,8 @@ from scipy import integrate, interpolate, optimize
 
 from cmap import CMAP
 
+plt.rcParams.update({'font.family': 'sans', 'font.size': 14})
+
 Point = np.dtype((float, (2,)))
 
 SCAN_DIRECTORY = "scans"
@@ -37,6 +39,8 @@ def main() -> None:
 	                    help="Any files in the scans directory with this substring in their filename will be analyzed")
 	parser.add_argument("wedge_id", type=str,
 	                    help="the ID number of the wedge range filter")
+	parser.add_argument("--distance", type=float, default=1,
+	                    help="the distance from the implosion to the detector, if you care about absolute fluence (cm)")
 	parser.add_argument("--filter", type=float,
 	                    help="the thickness of flat aluminum filtering in front of the image plate in μm")
 	parser.add_argument("--cr39", action="store_true",
@@ -45,14 +49,15 @@ def main() -> None:
 	                    help="whether a 300 μm Al nosetip was in front of the WRF")
 	args = parser.parse_args()
 
-	analyze_scanfile(args.filename, args.wedge_id, args.filter, args.cr39, args.nose)
+	analyze_scanfile(args.filename, args.wedge_id, args.distance, args.filter, args.cr39, args.nose)
 
 
-def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose: bool, cr39: bool) -> tuple[float, float]:
+def analyze_scanfile(filename: str, wedge_id: str, distance: float, filter: Optional[float], nose: bool, cr39: bool) -> tuple[float, float]:
 	""" infer electron temperature from a single xWRF scanfile
 	    :param filename: a substring that specifies which file you want.  it doesn’t have to be the
 	                     complete filename; just the shot number will usually do.
 	    :param wedge_id: the ID of the WRF that was used (for example "G069")
+	    :param distance: the distance between the implosion and the image plate (cm)
 	    :param filter: if an aluminum filter was placed between the wedge and the image plate, this
 	                   is the thickness of that filter in μm.  otherwise, it should be 0 or None.
 	    :param nose: whether a 300 μm aluminum nose was present in front of the wedge (in
@@ -68,8 +73,8 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 	with h5py.File(filepath, 'r') as f:
 		x_bin = f["PSL_per_px"].attrs["pixelSizeX"]  # (μm)
 		y_bin = f["PSL_per_px"].attrs["pixelSizeY"]  # (μm)
-		image = f["PSL_per_px"][:, :].T/x_bin/y_bin  # (?/μm^2)
 		fade_time = f["PSL_per_px"].attrs["scanDelaySeconds"]  # (s)
+		image = f["PSL_per_px"][:, :].T/x_bin/y_bin*(distance*1e4)**2/psl_fade(fade_time)  # (?/sr)
 	if x_bin != y_bin:
 		raise ValueError("why would these ever not be equal")
 	pixel_width = x_bin*1e-4
@@ -90,7 +95,7 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 
 	# perform the temperature fit
 	Te, dTe, εL, dεL = fit_temperature_with_error_bars(
-		thicknesses, thickness_error, psl, reference_energies, log_transmission, Al_attenuation, fade_time)
+		thicknesses, thickness_error, psl, reference_energies, log_transmission, Al_attenuation)
 
 	print(f"Inferred electron temperature = {Te:.2f} ± {dTe:.2f} keV\n"
 	      f"               total emission = {εL:.3g} ± {dεL:.3g} (units unclear)")
@@ -102,7 +107,7 @@ def analyze_scanfile(filename: str, wedge_id: str, filter: Optional[float], nose
 def collapse_image(pixel_width: float, image: NDArray[float], wedge_id: str
                    ) -> tuple[NDArray[float], float, NDArray[float]]:
 	""" find the fiducials in an xWRF scan, rotate the image, and map PSL to filter thickness
-	    :return the array of thicknesses (μm), the error bar on those thicknesses (μm), and the array of PSL values (PSL/μm^2)
+	    :return the array of thicknesses (μm), the error bar on those thicknesses (μm), and the array of PSL values (PSL/sr)
 	"""
 	x_centers = np.arange(0.5, image.shape[0])*pixel_width  # (cm)
 	y_centers = np.arange(0.5, image.shape[1])*pixel_width  # (cm)
@@ -219,7 +224,6 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
                                     measurements: NDArray[float],
                                     energies: NDArray[float],
                                     log_transmissions: NDArray[float], attenuations: NDArray[float],
-                                    fade_time: float,
                                     ) -> tuple[float, float, float, float]:
 	""" take a set of measured x-ray intensity values from a single chord thru the implosion and use their average and
 	    their ratios to infer the emission-averaged electron temperature, and the total line-integrated photic emission
@@ -227,14 +231,13 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 	    :param thicknesses: the set of aluminum thicknesses represented in the wedge (μm)
 	    :param thickness_error: the maximum plausible difference between the nominal and actual wedge thickness at
 	           any given point (μm)
-	    :param measurements: the detected radiation corresponded to each thickness (PSL/μm^2)
+	    :param measurements: the detected radiation corresponded to each thickness (PSL/sr)
 	    :param energies: the photon energies at which the sensitivities should be calculated (keV)
 	    :param log_transmissions: the log of the transmission probability at each reference energy through whatever
 	                              flat filtering exists in front of the IP
 		:param attenuations: the attenuation coefficient of aluminium at each reference energy (μm^-1)
-	    :param fade_time: the delay between the experiment and the image plate scan (s)
 	    :return: the electron temperature (keV), the error bar on electron temperature (keV),
-	             the total emission (PSL/μm^2/sr), and the error bar on that (PSL/μm^2/sr)
+	             the total emission (PSL/sr), and the error bar on that (PSL/sr)
 	"""
 	# do, not a MC per se, but a sweep of some unknowns to get error bars
 	sample_reconstructions = []
@@ -245,10 +248,9 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 			for transmission_factor in [1 - THICKNESS_ERROR, 1 + THICKNESS_ERROR]:
 				for psl_attenuation in [PSL_ATTENUATION - PSL_ATTENUATION_ERROR, PSL_ATTENUATION + PSL_ATTENUATION_ERROR]:
 					for prefactor in [SENSITIVITY - SENSITIVITY_ERROR, SENSITIVITY + SENSITIVITY_ERROR]:
-						log_sensitivities = log_transmissions*transmission_factor + \
-						                    log_xray_sensitivity(energies, fade_time,
-						                                         prefactor=prefactor,
-						                                         psl_attenuation=psl_attenuation)
+						log_sensitivities = log_transmissions*transmission_factor + log_xray_sensitivity(
+							energies, prefactor=prefactor, psl_attenuation=psl_attenuation)
+
 						temperature, emission, reconstruction = fit_temperature_exactly(
 							thicknesses + perturbations, measurements,
 							energies, attenuations, log_sensitivities)
@@ -264,33 +266,31 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 	sample_residuals = [measurements - fit for fit in sample_reconstructions]
 
 	# perform the nominal reconstruction to get the reconstructed curve out
-	log_sensitivities = log_transmissions + \
-	                    log_xray_sensitivity(energies, fade_time,
-	                                         psl_attenuation=PSL_ATTENUATION,
-	                                         prefactor=SENSITIVITY)
+	log_sensitivities = log_transmissions + log_xray_sensitivity(
+		energies, prefactor=SENSITIVITY, psl_attenuation=PSL_ATTENUATION)
 	_, _, reconstruction = fit_temperature_exactly(
 		thicknesses, measurements, energies, attenuations, log_sensitivities)
 
 	# plot the fit quality
 	fig, axs = plt.subplots(2, 1, sharex="all", figsize=(7, 5), gridspec_kw=dict(hspace=0))
-	axs[0].plot(thicknesses, measurements*1e3, "C0-", label="Data", zorder=30)
-	axs[0].plot(thicknesses, reconstruction*1e3, "C1--", label="Fit", zorder=20)
+	axs[0].plot(thicknesses, measurements, "C0-", label="Data", zorder=30)
+	axs[0].plot(thicknesses, reconstruction, "C1--", label="Fit", zorder=20)
 	axs[0].fill_between(thicknesses,
-	                    np.min(sample_reconstructions, axis=0)*1e3,
-	                    np.max(sample_reconstructions, axis=0)*1e3, color="C1", alpha=1/4, zorder=10)
+	                    np.min(sample_reconstructions, axis=0),
+	                    np.max(sample_reconstructions, axis=0), color="C1", alpha=1/4, zorder=10)
 	axs[0].grid("on")
 	axs[0].set_title(f"Best fit (Tₑ = {temperature:.2f} ± {dtemperature:.2f} keV)")
-	axs[0].set_ylabel("PSL (×10³)")
+	axs[0].set_ylabel("PSL")
 	axs[0].locator_params(steps=[1, 2, 5, 10], nbins=10)
 
-	axs[1].plot(thicknesses, (measurements - reconstruction)*1e3, "C2.", zorder=30)
+	axs[1].plot(thicknesses, (measurements - reconstruction)/reconstruction, "C2.", markersize=4, zorder=30)
 	axs[1].fill_between(thicknesses,
-	                    np.min(sample_residuals, axis=0)*1e3,
-	                    np.max(sample_residuals, axis=0)*1e3,
+	                    np.min(sample_residuals, axis=0)/reconstruction,
+	                    np.max(sample_residuals, axis=0)/reconstruction,
 	                    color="C2", alpha=1/4, zorder=20)
 	axs[1].axhline(0, color="k", linewidth=1, zorder=10)
 	axs[1].grid("on")
-	axs[1].set_ylabel("Residual (×10³)")
+	axs[1].set_ylabel("Residual")
 	axs[1].set_xlabel("Aluminum thickness (μm)")
 	axs[1].set_xlim(thicknesses[0], thicknesses[-1])
 	axs[1].locator_params(steps=[1, 2, 5, 10], nbins=10)
@@ -315,13 +315,13 @@ def fit_temperature_exactly(thicknesses: NDArray[float], measurements: NDArray[f
 	    their ratios to infer the emission-averaged electron temperature, and the total line-integrated photic emission
 	    along that chord. assume you know the PSL values and thicknesses exactly.
 		:param thicknesses: the set of aluminum thicknesses represented in the wedge (μm)
-		:param measurements: the detected radiation corresponded to each thickness (PSL/μm^2)
+		:param measurements: the detected radiation corresponded to each thickness (PSL/sr)
 		:param energies: the photon energies at which the sensitivities have been calculated (keV)
 		:param attenuations: the attenuation coefficient of aluminium at each reference energy (μm^-1)
 		:param log_sensitivities: the log of the dimensionless sensitivity of the detector at each reference energy
-		:return: the electron temperature (keV), the total emission (PSL/μm^2/sr), and the fit measurements (PSL/μm^2)
+		:return: the electron temperature (keV), the total emission (PSL/sr), and the fit measurements (PSL/sr)
 	"""
-	measurement_errors = 1e-3*np.sqrt(np.max(measurements)/measurements)
+	measurement_errors = 1e-3*np.sqrt(np.max(measurements)*measurements)
 
 	def compute_values(βe):
 		integrand = np.exp(
@@ -373,29 +373,23 @@ def fit_temperature_exactly(thicknesses: NDArray[float], measurements: NDArray[f
 		return best_Te, best_εL, numerator/denominator*unscaled_psl
 
 
-def log_xray_sensitivity(energy: NDArray[float], fade_time: float,
+def log_xray_sensitivity(energy: NDArray[float],
                          prefactor=1/2200, thickness=112., psl_attenuation=1/45., material="phosphor",
-                         A1=.436, A2=.403, τ1=1.134e3, τ2=9.85e4) -> NDArray[float]:
+                         ) -> NDArray[float]:
 	""" calculate the log of the fraction of x-ray energy at some frequency that is measured by an image
 	    plate of the given characteristics, given some filtering in front of it
 	    :param energy: the photon energies (keV)
-	    :param fade_time: the delay between the experiment and the image plate scan (s)
 	    :param prefactor: a constant scaling factor on the absolute sensitivity
 	    :param thickness: the thickness of the image plate (μm)
 	    :param psl_attenuation: the attenuation constant of the image plate's characteristic photostimulated
 	                            luminescence through the phosphor layer (μm^-1)
 	    :param material: the name of the image plate material (probably just the elemental symbol)
-	    :param A1: an initial condition for the fade term
-	    :param A2: an initial condition for the fade term
-	    :param τ1: a decay time for the fade term (s)
-	    :param τ2: a decay time for the fade term (s)
 	    :return: the fraction of photic energy that reaches the scanner
 	"""
 	attenuation = load_attenuation_curve(energy, material)
 	self_transparency = 1/(1 + psl_attenuation/attenuation)
 	log_sensitivity = np.log(
-		self_transparency * (1 - np.exp(-attenuation*thickness/self_transparency)) *
-		prefactor * psl_fade(fade_time, A1, A2, τ1, τ2))
+		prefactor * self_transparency * (1 - np.exp(-attenuation*thickness/self_transparency)))
 	return log_sensitivity
 
 
@@ -409,13 +403,13 @@ def load_attenuation_curve(energy: NDArray[float], material: str) -> NDArray[flo
 	return np.interp(energy, table[:, 0], table[:, 1])
 
 
-def psl_fade(time: float, A1: float, A2: float, τ1: float, τ2: float):
+def psl_fade(time: float, A1=.436, A2=.403, τ1=1.134e3, τ2=9.85e4):
 	""" the portion of PSL that remains after some seconds have passed
 	    :param time: the time between exposure and scan (s)
-	    :param A1: the portion of energy initially in the fast-decaying eigenmode (nominally .436±.016)
-	    :param A2: the portion of energy initially in the slow-decaying eigenmode (nominally .403±.013)
-	    :param τ1: the decay time of the faster eigenmode (nominally 1134±90 s)
-	    :param τ2: the decay time of the slower eigenmode (nominally 98.5±9.1 ks)
+	    :param A1: the portion of energy initially in the fast-decaying eigenmode
+	    :param A2: the portion of energy initially in the slow-decaying eigenmode
+	    :param τ1: the decay time of the faster eigenmode (s)
+	    :param τ2: the decay time of the slower eigenmode (s)
 	"""
 	return A1*np.exp(-time/τ1) + A2*np.exp(-time/τ2) + (1 - A1 - A2)
 

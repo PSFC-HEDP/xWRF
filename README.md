@@ -2,12 +2,14 @@
  A simple command-line tool for extracting electron temperatures from wedge image plate data
  To use, call the command
  ```bash
- python analyze_xwrf.py SHOT_NUMBER WEDGE_ID [--filter=FILTER_THICKNESS] [--nose] [--cr39]
+ python analyze_xwrf.py SHOT_NUMBER WEDGE_ID [--distance=DISTANCE] [--filter=FILTER_THICKNESS] [--nose] [--cr39]
  ```
  where `SHOT_NUMBER` is any substring that uniquely identifies the file you want to analyze (most
  likely the shot number) and `WEDGE_ID` is the ID of the wedge range filter (for example, "G069").
+ If you care about absolute emission, you’ll want to use `--distance` to specify the
+ standoff distance in centimeters, but if you don’t care then you can leave this out.
  If you fielded the image plate with more filtering than just the wedge, then specify it in the
- optional arguments.  Using `--filter` adds a flat aluminium filter; specify the thickness in
+ remaining optional arguments.  Using `--filter` adds a flat aluminium filter; specify the thickness in
  micrometers by replacing `FILTER_THICKNESS`.  Using `--nose` adds an aluminium nose cap and is
  equivalent to `--filter=300` (note that they do stack, so feel free to use both).  Using `--cr39`
  adds a standard 1500 μm piece of CR-39.
