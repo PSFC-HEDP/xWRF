@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from scipy import integrate, interpolate, optimize
 
 from cmap import CMAP
+from image_plate import load_attenuation_curve, fade, log_xray_sensitivity
 
 plt.rcParams.update({'font.family': 'sans', 'font.size': 14})
 
@@ -24,11 +25,11 @@ SCAN_DIRECTORY = "scans"
 Υ_MIN = 0.01
 Υ_MAX = 0.94
 NUM_SAMPLES = 2
-THICKNESS_ERROR = 3.e-2
+THICKNESS_ERROR = 3.e-2  # (dimensionless)
 PSL_ATTENUATION = 1/45.  # μm^-1
 PSL_ATTENUATION_ERROR = 5.e-3  # μm^-1
-SENSITIVITY = 1/2200
-SENSITIVITY_ERROR = 4.e-5
+WORK_FUNCTION = 2200  # keV
+WORK_FUNCTION_ERROR = 100  # keV
 
 
 def main() -> None:
@@ -74,7 +75,7 @@ def analyze_scanfile(filename: str, wedge_id: str, distance: float, filter: Opti
 		x_bin = f["PSL_per_px"].attrs["pixelSizeX"]  # (μm)
 		y_bin = f["PSL_per_px"].attrs["pixelSizeY"]  # (μm)
 		fade_time = f["PSL_per_px"].attrs["scanDelaySeconds"]  # (s)
-		image = f["PSL_per_px"][:, :].T/x_bin/y_bin*(distance*1e4)**2/psl_fade(fade_time)  # (?/sr)
+		image = f["PSL_per_px"][:, :].T/x_bin/y_bin*(distance*1e4)**2/fade(fade_time)  # (?/sr)
 	if x_bin != y_bin:
 		raise ValueError("why would these ever not be equal")
 	pixel_width = x_bin*1e-4
@@ -247,9 +248,9 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 			perturbations = thickness_error*np.linspace(x_left, x_right, thicknesses.size)
 			for transmission_factor in [1 - THICKNESS_ERROR, 1 + THICKNESS_ERROR]:
 				for psl_attenuation in [PSL_ATTENUATION - PSL_ATTENUATION_ERROR, PSL_ATTENUATION + PSL_ATTENUATION_ERROR]:
-					for prefactor in [SENSITIVITY - SENSITIVITY_ERROR, SENSITIVITY + SENSITIVITY_ERROR]:
+					for work_function in [WORK_FUNCTION - WORK_FUNCTION_ERROR, WORK_FUNCTION + WORK_FUNCTION_ERROR]:
 						log_sensitivities = log_transmissions*transmission_factor + log_xray_sensitivity(
-							energies, prefactor=prefactor, psl_attenuation=psl_attenuation)
+							energies, work_function=work_function, psl_attenuation=psl_attenuation)
 
 						temperature, emission, reconstruction = fit_temperature_exactly(
 							thicknesses + perturbations, measurements,
@@ -267,7 +268,7 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 
 	# perform the nominal reconstruction to get the reconstructed curve out
 	log_sensitivities = log_transmissions + log_xray_sensitivity(
-		energies, prefactor=SENSITIVITY, psl_attenuation=PSL_ATTENUATION)
+		energies, work_function=WORK_FUNCTION, psl_attenuation=PSL_ATTENUATION)
 	_, _, reconstruction = fit_temperature_exactly(
 		thicknesses, measurements, energies, attenuations, log_sensitivities)
 
@@ -371,47 +372,6 @@ def fit_temperature_exactly(thicknesses: NDArray[float], measurements: NDArray[f
 		best_εL = numerator/denominator*best_Te
 
 		return best_Te, best_εL, numerator/denominator*unscaled_psl
-
-
-def log_xray_sensitivity(energy: NDArray[float],
-                         prefactor=1/2200, thickness=112., psl_attenuation=1/45., material="phosphor",
-                         ) -> NDArray[float]:
-	""" calculate the log of the fraction of x-ray energy at some frequency that is measured by an image
-	    plate of the given characteristics, given some filtering in front of it
-	    :param energy: the photon energies (keV)
-	    :param prefactor: a constant scaling factor on the absolute sensitivity
-	    :param thickness: the thickness of the image plate (μm)
-	    :param psl_attenuation: the attenuation constant of the image plate's characteristic photostimulated
-	                            luminescence through the phosphor layer (μm^-1)
-	    :param material: the name of the image plate material (probably just the elemental symbol)
-	    :return: the fraction of photic energy that reaches the scanner
-	"""
-	attenuation = load_attenuation_curve(energy, material)
-	self_transparency = 1/(1 + psl_attenuation/attenuation)
-	log_sensitivity = np.log(
-		prefactor * self_transparency * (1 - np.exp(-attenuation*thickness/self_transparency)))
-	return log_sensitivity
-
-
-def load_attenuation_curve(energy: NDArray[float], material: str) -> NDArray[float]:
-	""" load the attenuation curve for x-rays in a material
-	    :param energy: the photon energies (keV)
-	    :param material: the name of the material (probably just the elemental symbol)
-	    :return: the attenuation constant at the specified energy (μm^-1)
-	"""
-	table = np.loadtxt(f"tables/attenuation_{material}.csv", delimiter=",")
-	return np.interp(energy, table[:, 0], table[:, 1])
-
-
-def psl_fade(time: float, A1=.436, A2=.403, τ1=1.134e3, τ2=9.85e4):
-	""" the portion of PSL that remains after some seconds have passed
-	    :param time: the time between exposure and scan (s)
-	    :param A1: the portion of energy initially in the fast-decaying eigenmode
-	    :param A2: the portion of energy initially in the slow-decaying eigenmode
-	    :param τ1: the decay time of the faster eigenmode (s)
-	    :param τ2: the decay time of the slower eigenmode (s)
-	"""
-	return A1*np.exp(-time/τ1) + A2*np.exp(-time/τ2) + (1 - A1 - A2)
 
 
 def wedge_thickness_function(x: NDArray[float], x0: float, delta_t0: float, delta_dtdx: float) -> NDArray[float]:
