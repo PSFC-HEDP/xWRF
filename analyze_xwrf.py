@@ -2,6 +2,7 @@
 import argparse
 import os
 from math import inf, nan, pi
+import sys
 from typing import Optional
 
 import h5py
@@ -50,7 +51,12 @@ def main() -> None:
 	                    help="whether a 300 μm Al nosetip was in front of the WRF")
 	args = parser.parse_args()
 
-	analyze_scanfile(args.filename, args.wedge_id, args.distance, args.filter, args.cr39, args.nose)
+	try:
+		analyze_scanfile(args.filename, args.wedge_id, args.distance, args.filter, args.cr39, args.nose)
+	except Exception as e:
+		print("Error!", e)
+		plt.show()
+		sys.exit(1)
 
 
 def analyze_scanfile(filename: str, wedge_id: str, distance: float, filter: Optional[float], nose: bool, cr39: bool) -> tuple[float, float]:
