@@ -1,7 +1,7 @@
 # analyze CPS
 import argparse
 import os
-from math import inf, nan, pi
+from math import inf, nan, pi, ceil
 import sys
 from typing import Optional
 
@@ -179,26 +179,33 @@ def collapse_image(pixel_width: float, image: NDArray[float], wedge_id: str
 def find_fiducials(pixel_width: float, image: NDArray[float]) -> NDArray[Point]:
 	""" find the centers of the three big fiducial circles """
 	expected_radius = .079
-	sub_image_size = int(4*expected_radius/pixel_width)
+	sub_image_size = ceil(4*expected_radius/pixel_width)
 	fiducials = []
 	for i in range(0, image.shape[0] - sub_image_size, sub_image_size//2):
 		for j in range(0, image.shape[1] - sub_image_size, sub_image_size//2):
 			sub_image = image[i:i + sub_image_size, j:j + sub_image_size]
 			bright_pixels = sub_image >= np.quantile(sub_image, 1 - pi/16)
-			# if it sees a bright spot in its entirety...
+			# look for frames with bright spots
 			if np.any(bright_pixels) and not np.all(bright_pixels):
+				# get the coordinates of the bright spot
 				xs = pixel_width*(i + np.arange(sub_image_size))
 				ys = pixel_width*(j + np.arange(sub_image_size))
 				x0 = np.average(xs, weights=np.sum(bright_pixels, axis=1))
+				y0 = np.average(ys, weights=np.sum(bright_pixels, axis=0))
+				r = np.hypot(*np.meshgrid(xs - x0, ys - y0, indexing="ij"))
+				# do some filtered center-of-massing to try to get a good centroid
+				isolated_bright_pixels = np.where(r < 2*expected_radius, bright_pixels, 0)
+				x0 = np.average(xs, weights=np.sum(isolated_bright_pixels, axis=1))
+				y0 = np.average(ys, weights=np.sum(isolated_bright_pixels, axis=0))
+				r = np.hypot(*np.meshgrid(xs - x0, ys - y0, indexing="ij"))
+				# make sure it's in the part of the frame that doesn't overlap other frames
 				if x0 < xs[0] + expected_radius or x0 > xs[-1] - expected_radius:
 					continue
-				y0 = np.average(ys, weights=np.sum(bright_pixels, axis=0))
 				if y0 < ys[0] + expected_radius or y0 > ys[-1] - expected_radius:
 					continue
-				r = np.hypot(*np.meshgrid(xs - x0, ys - y0, indexing="ij"))
 				# if the spot is not too much bigger than we expect
-				if not np.any(bright_pixels[r >= 1.33*expected_radius]):
-					# if the spot is not much smaller than we expect
+				if not np.any(bright_pixels[(r >= 1.33*expected_radius) & (r <= 2.00*expected_radius)]):
+					# if the spot is not too much smaller than we expect
 					if np.all(bright_pixels[r <= .75*expected_radius]):
 						# save the centroid we found
 						fiducials.append((x0, y0))
