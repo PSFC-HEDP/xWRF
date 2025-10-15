@@ -116,6 +116,7 @@ def collapse_image(pixel_width: float, image: NDArray[float], wedge_id: str
 	""" find the fiducials in an xWRF scan, rotate the image, and map PSL to filter thickness
 	    :return the array of thicknesses (μm), the error bar on those thicknesses (μm), and the array of PSL values (PSL/sr)
 	"""
+	# convert the image to an interpolator
 	x_centers = np.arange(0.5, image.shape[0])*pixel_width  # (cm)
 	y_centers = np.arange(0.5, image.shape[1])*pixel_width  # (cm)
 	image_interpolator = interpolate.RegularGridInterpolator((x_centers, y_centers), image)
@@ -127,8 +128,15 @@ def collapse_image(pixel_width: float, image: NDArray[float], wedge_id: str
 	# load the WRF thickness calibration
 	calibration_table = pd.read_csv("tables/wrf_calibrations.csv", sep=",", index_col="id")
 	calibration = calibration_table.loc[wedge_id.lower()]
-	thickness = wedge_thickness_function(ξ_data, calibration.xp, calibration.dt0, calibration.dtdx)
-	thickness_error = calibration["systematic error"]/.02  # fudge this by assuming dE/dx=20keV/μm (MeV/(MeV/μm) = μm)
+	dimensions_table = pd.read_csv("tables/wrf_types.csv", sep=",", index_col="type")
+	dimensions = dimensions_table.loc[calibration.type]
+
+	# calculate the wedge thickness
+	X_data = dimensions.width*(ξ_data - 1/2)
+	thickness = wedge_thickness_function(
+		X_data, dimensions.width, dimensions.t_min, dimensions.t_max,
+		calibration.x0, calibration.t0_deviation, calibration.dtdx_deviation)
+	thickness_error = calibration.systematic_error/.02  # fudge this by assuming dE/dx=20keV/μm (MeV/(MeV/μm) = μm)
 
 	# locate the fiducials and rebase to them
 	υ_lever, origin, ξ_lever = find_fiducials(pixel_width, image)[:, np.newaxis, np.newaxis, :]
@@ -297,7 +305,7 @@ def fit_temperature_with_error_bars(thicknesses: NDArray[float], thickness_error
 	                    color="C2", alpha=1/4, zorder=20)
 	axs[1].axhline(0, color="k", linewidth=1, zorder=10)
 	axs[1].grid("on")
-	axs[1].set_ylabel("Residual")
+	axs[1].set_ylabel("Residual (normalized)")
 	axs[1].set_xlabel("Aluminum thickness (μm)")
 	axs[1].set_xlim(thicknesses[0], thicknesses[-1])
 	axs[1].locator_params(steps=[1, 2, 5, 10], nbins=10)
@@ -380,21 +388,20 @@ def fit_temperature_exactly(thicknesses: NDArray[float], measurements: NDArray[f
 		return best_Te, best_εL, numerator/denominator*unscaled_psl
 
 
-def wedge_thickness_function(x: NDArray[float], x0: float, delta_t0: float, delta_dtdx: float) -> NDArray[float]:
+def wedge_thickness_function(X: NDArray[float], width: float, t_min: float, t_max: float, x0: float, delta_t0: float, delta_dtdx: float) -> NDArray[float]:
 	""" calculate the thickness of a WRF at a set of specified x values, given calibration info
-	    :param x: the desired normalized x values, from 0 (at the left fiducial) to 1 (at the right fiducial)
+	    :param X: the desired x values, defined with 0 as the midpoint between the fiducials and positive x toward the thicker side (cm)
+	    :param width: the distance betwene the fiducials (cm)
+	    :param t_min: the nominal thickness at the left fiducial (μm)
+	    :param t_max: the nominal thickness at the right fiducial (μm)
 	    :param x0: the x, measured from the midpoint, at which the calibration measurements were made
-	    :param delta_t0: the opposite of the difference between the actual thickness at xp and the nominal one
-	    :param delta_dtdx: the difference between the actual slope and the nominal slope (why didn’t Fredrick just record the total slope?)
+	    :param delta_t0: the opposite of the difference between the actual thickness at x0 and the nominal one (μm)
+	    :param delta_dtdx: the opposite of the difference between the actual slope and the nominal slope (μm/cm) (why didn’t Fredrick just record the total slope?)
 	    :return: the average thickness at that x value (μm)
 	"""
-	half_width = 0.474*2.54
-	X = (2*x - 1)*half_width  # convert to the coordinates Fredrick uses to define his calibration
-	t_left = 0.0155*2.54e4
-	t_rite = 0.0710*2.54e4
-	t0 = (t_left + t_rite)/2
-	dtdx = (t_rite - t_left)/(2*half_width)
-	return t0 - delta_t0 + delta_dtdx*x0 + X*(dtdx - delta_dtdx)
+	t0 = (t_min + t_max)/2
+	dtdx = (t_max - t_min)/width
+	return t0 - delta_t0 + X*dtdx - (X - x0)*delta_dtdx
 
 
 def triangle_is_counterclockwise(a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]) -> bool:

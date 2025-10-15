@@ -1,0 +1,6 @@
+type,material,width,t_min,t_max
+broadband,ZrO2,3.8,15,1500
+NB,Al2O3,3.8,15,1500
+indirect drive,Al,1.30,350,1250
+flycut,Al,2.408,393.7,1803.4
+Gilbert,Al,2.408,393.7,1803.4
