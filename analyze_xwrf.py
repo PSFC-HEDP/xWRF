@@ -21,9 +21,9 @@ Point = np.dtype((float, (2,)))
 
 SCAN_DIRECTORY = "scans"
 
-Ξ_MIN = 0.20
-Ξ_MAX = 0.95
-Υ_MIN = 0.01
+Ξ_MIN = 0.03
+Ξ_MAX = 0.97
+Υ_MIN = 0.04
 Υ_MAX = 0.94
 NUM_SAMPLES = 2
 THICKNESS_ERROR = 3.e-2  # (dimensionless)
